@@ -1,7 +1,11 @@
 [package]
-name = "substrate-mcp-rust-sdk"
+name = "substrate-mcp-rs"
 version = "0.1.0"
 edition = "2024"
+authors = ["Thomas Marches <thomas.marches@epitech.eu>"]
+description = "A Model Context Protocol (MCP) server for interacting with Substrate blockchains, written in Rust."
+license = "MIT"
+repository = "https://github.com/ThomasMarches/substrate-mcp-rs"
 
 [dependencies]
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = [
@@ -17,3 +21,4 @@ serde = { version = "1.0", features = ["derive"] }
 subxt = { version = "0.41", features = ["native"] }
 subxt-signer = "0.41"
 hex = "0.4"
+dotenv = "0.15"

@@ -1,8 +1,16 @@
+//! Substrate integration tools for the MCP server.
+//!
+//! This module provides dynamic access to Substrate blockchain operations (balances, pallets, storage, events, transactions, etc.)
+//! via the Model Context Protocol (MCP). Configuration is via environment variables and runtime metadata.
+
+use dotenv::dotenv;
+use hex;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::tool;
 use rmcp::{Error as McpError, RoleServer, ServerHandler, model::*, service::RequestContext};
 use serde_json;
 use serde_json::json;
+use std::env;
 use std::{str::FromStr, sync::Arc};
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::polkadot::PolkadotExtrinsicParamsBuilder as Params;
@@ -14,37 +22,94 @@ use subxt::utils::H256;
 use subxt::{Config, OnlineClient, PolkadotConfig};
 use subxt_signer::sr25519::Keypair;
 use tokio::sync::Mutex;
+use tracing;
 
 // Generate an interface that we can use from the node's metadata.
-#[subxt::subxt(runtime_metadata_path = "artifacts/statemint_metadata.scale")]
+#[subxt::subxt(runtime_metadata_path = "artifacts/metadata.scale")]
 pub mod substrate {}
 
 type SubstrateConfig = PolkadotConfig;
 
+/// Main tool for interacting with a Substrate blockchain via MCP.
+///
+/// Provides dynamic querying, transaction submission, and runtime API access.
 #[derive(Clone)]
 pub struct SubstrateTool {
     api: Arc<Mutex<OnlineClient<SubstrateConfig>>>,
     rpc_client: Arc<Mutex<RpcClient>>,
     rpc_methods: Arc<Mutex<LegacyRpcMethods<SubstrateConfig>>>,
+    signing_keypair: Option<Keypair>,
 }
 
 #[tool(tool_box)]
 impl SubstrateTool {
+    /// Create a new SubstrateTool, loading configuration from environment variables.
+    ///
+    /// - `RPC_URL`: WebSocket endpoint for the Substrate node
+    /// - `SIGNING_KEYPAIR_HEX`: Signing keypair as hex (32 bytes, optional)
+    ///
+    /// If the signing keypair is missing or invalid, transaction-signing tools will return an error, but the server will still start.
+    ///
+    /// # Logging
+    /// Logs a warning if the signing keypair is missing or invalid, and info if loaded successfully.
     pub async fn new() -> Self {
-        let rpc = RpcClient::from_url("wss://melodie-rpc.allfeat.io")
+        dotenv().ok();
+        let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set in .env");
+        let rpc = RpcClient::from_url(&rpc_url)
             .await
             .expect("Failed to create rpc client");
         let client = OnlineClient::<SubstrateConfig>::from_rpc_client(rpc.clone())
             .await
             .expect("Failed to create API client");
 
+        let signing_keypair = match env::var("SIGNING_KEYPAIR_HEX") {
+            Ok(signing_keypair_hex) => match hex::decode(signing_keypair_hex.trim()) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    match Keypair::from_secret_key(bytes.as_slice().try_into().unwrap()) {
+                        Ok(keypair) => {
+                            tracing::info!("Loaded signing keypair from SIGNING_KEYPAIR_HEX");
+                            Some(keypair)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Invalid SIGNING_KEYPAIR_HEX: {e}; signing will be disabled"
+                            );
+                            None
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::warn!("SIGNING_KEYPAIR_HEX is not 32 bytes; signing will be disabled");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to decode SIGNING_KEYPAIR_HEX as hex: {e}; signing will be disabled"
+                    );
+                    None
+                }
+            },
+            Err(_) => {
+                tracing::warn!("SIGNING_KEYPAIR_HEX not set; signing will be disabled");
+                None
+            }
+        };
+
         Self {
             api: Arc::new(Mutex::new(client)),
             rpc_client: Arc::new(Mutex::new(rpc.clone())),
             rpc_methods: Arc::new(Mutex::new(LegacyRpcMethods::<SubstrateConfig>::new(rpc))),
+            signing_keypair,
         }
     }
 
+    /// Fetch the free balance of an account.
+    ///
+    /// # Parameters
+    /// - `account`: SS58-encoded account address
+    ///
+    /// # Returns
+    /// The free balance as a string, or an error if not found.
     #[tool(description = "Fetch the balance of an account")]
     pub async fn query_balance(
         &self,
@@ -86,6 +151,10 @@ impl SubstrateTool {
         }
     }
 
+    /// List all pallets in the runtime metadata.
+    ///
+    /// # Returns
+    /// A list of pallet names.
     #[tool(description = "List all pallets")]
     pub async fn list_pallets(&self) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
@@ -99,6 +168,13 @@ impl SubstrateTool {
         ))
     }
 
+    /// List all storage entries for a given pallet.
+    ///
+    /// # Parameters
+    /// - `pallet_name`: Name of the pallet
+    ///
+    /// # Returns
+    /// A list of storage entry names.
     #[tool(description = "List all of a pallet's entries")]
     pub async fn list_pallet_entries(
         &self,
@@ -128,6 +204,15 @@ impl SubstrateTool {
         Ok(CallToolResult::success(entries))
     }
 
+    /// Execute a dynamic runtime API call.
+    ///
+    /// # Parameters
+    /// - `trait_name`: Runtime API trait name
+    /// - `method_name`: Method name
+    /// - `args_data`: Arguments as strings
+    ///
+    /// # Returns
+    /// The result of the runtime API call as a string.
     #[tool(description = "Execute a dynamic runtime API call")]
     pub async fn dynamic_runtime_call(
         &self,
@@ -158,7 +243,18 @@ impl SubstrateTool {
         )]))
     }
 
+    /// Construct, sign, and submit a dynamic transaction.
+    ///
+    /// # Parameters
+    /// - `pallet_name`: Pallet name
+    /// - `call_name`: Call name
+    /// - `call_parameters`: Call parameters as a string
+    /// - `mortality`, `nonce`, `tip_of_asset_id`, `tip`, `tip_of`: Optional transaction params
+    ///
+    /// # Returns
+    /// Transaction hash if successful.
     #[tool(description = "Constructs, signs and sends a dynamic transaction")]
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_dynamic_signed_transaction(
         &self,
         #[tool(param)] pallet_name: String,
@@ -170,6 +266,10 @@ impl SubstrateTool {
         #[tool(param)] tip: Option<u128>,
         #[tool(param)] tip_of: Option<u128>,
     ) -> Result<CallToolResult, McpError> {
+        let signing_keypair = self
+            .signing_keypair
+            .as_ref()
+            .ok_or(McpError::internal_error("Signing keypair is not set", None))?;
         let client = self.api.lock().await;
 
         let tx = subxt::dynamic::tx(
@@ -177,16 +277,6 @@ impl SubstrateTool {
             call_name,
             vec![Value::from_bytes(call_parameters.as_bytes())],
         );
-
-        let from = Keypair::from_secret_key(
-            // TODO: Use a real keypair from .env
-            "5Gw3QZJx9gnQKjZxBQJY8Y5K4Y5K4Y5K4Y5K4Y5K4Y5K4"
-                .as_bytes()
-                .try_into()
-                .unwrap(),
-        )
-        .map_err(|e| McpError::internal_error(format!("Failed to create keypair: {}", e), None))?;
-
         let mut tx_params = Params::new();
 
         if let Some(mortality) = mortality {
@@ -207,7 +297,7 @@ impl SubstrateTool {
 
         let tx_hash = client
             .tx()
-            .sign_and_submit(&tx, &from, tx_params.build())
+            .sign_and_submit(&tx, signing_keypair, tx_params.build())
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Failed to submit transaction: {}", e), None)
@@ -218,10 +308,21 @@ impl SubstrateTool {
         ))]))
     }
 
+    /// Construct, sign, and submit a dynamic transaction and wait for it to be included in a block.
+    ///
+    /// # Parameters
+    /// - `pallet_name`: Pallet name
+    /// - `call_name`: Call name
+    /// - `call_parameters`: Call parameters as a string
+    /// - `mortality`, `nonce`, `tip_of_asset_id`, `tip`, `tip_of`: Optional transaction params
+    ///
+    /// # Returns
+    /// The transaction hash and the block number it was included in.
     #[tool(
-        description = "Constructs, signs and sends a dynamic transaction and waits for it to be included in a block"
+        description = "Constructs and sends a transaction and waits for it to be included in a block"
     )]
-    pub async fn send_dynamic_signed_transaction_and_wait(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_dynamic_transaction_and_wait(
         &self,
         #[tool(param)] pallet_name: String,
         #[tool(param)] call_name: String,
@@ -232,6 +333,10 @@ impl SubstrateTool {
         #[tool(param)] tip: Option<u128>,
         #[tool(param)] tip_of: Option<u128>,
     ) -> Result<CallToolResult, McpError> {
+        let signing_keypair = self
+            .signing_keypair
+            .as_ref()
+            .ok_or(McpError::internal_error("Signing keypair is not set", None))?;
         let client = self.api.lock().await;
 
         let tx = subxt::dynamic::tx(
@@ -239,16 +344,6 @@ impl SubstrateTool {
             call_name,
             vec![Value::from_bytes(call_parameters.as_bytes())],
         );
-
-        let from = Keypair::from_secret_key(
-            // TODO: Use a real keypair from .env
-            "5Gw3QZJx9gnQKjZxBQJY8Y5K4Y5K4Y5K4Y5K4Y5K4Y5K4"
-                .as_bytes()
-                .try_into()
-                .unwrap(),
-        )
-        .map_err(|e| McpError::internal_error(format!("Failed to create keypair: {}", e), None))?;
-
         let mut tx_params = Params::new();
 
         if let Some(mortality) = mortality {
@@ -269,7 +364,7 @@ impl SubstrateTool {
 
         let mut tx_progress = client
             .tx()
-            .sign_and_submit_then_watch(&tx, &from, tx_params.build())
+            .sign_and_submit_then_watch(&tx, signing_keypair, tx_params.build())
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Failed to send transaction: {}", e), None)
@@ -300,6 +395,15 @@ impl SubstrateTool {
         ))]))
     }
 
+    /// Query storage dynamically by providing pallet and storage item names.
+    ///
+    /// # Parameters
+    /// - `pallet_name`: Pallet name
+    /// - `entry_name`: Storage item name
+    /// - `storage_keys`: Optional storage keys as a list of strings
+    ///
+    /// # Returns
+    /// The storage value as a string.
     #[tool(description = "Query storage dynamically by providing pallet and storage item names")]
     pub async fn query_storage(
         &self,
@@ -352,6 +456,10 @@ impl SubstrateTool {
         }
     }
 
+    /// Get all events from the latest block.
+    ///
+    /// # Returns
+    /// A list of events with their details.
     #[tool(description = "Get all events from the latest block")]
     pub async fn get_latest_events(&self) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
@@ -381,6 +489,14 @@ impl SubstrateTool {
         Ok(CallToolResult::success(event_details))
     }
 
+    /// Find specific events by pallet and variant name.
+    ///
+    /// # Parameters
+    /// - `pallet_name`: Pallet name
+    /// - `event_name`: Event name
+    ///
+    /// # Returns
+    /// A list of events with their details.
     #[tool(description = "Find specific events by pallet and variant name")]
     pub async fn find_events(
         &self,
@@ -423,6 +539,14 @@ impl SubstrateTool {
         Ok(CallToolResult::success(matching_events))
     }
 
+    /// Get a constant value from a specific pallet.
+    ///
+    /// # Parameters
+    /// - `pallet_name`: Pallet name
+    /// - `constant_name`: Constant name
+    ///
+    /// # Returns
+    /// The constant value as a string.
     #[tool(description = "Get a constant value from a specific pallet")]
     pub async fn get_constant(
         &self,
@@ -456,6 +580,10 @@ impl SubstrateTool {
         ))]))
     }
 
+    /// Get details about the latest finalized block.
+    ///
+    /// # Returns
+    /// A list of block details.
     #[tool(description = "Get details about the latest finalized block")]
     pub async fn get_latest_block(&self) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
@@ -533,6 +661,13 @@ impl SubstrateTool {
         Ok(CallToolResult::success(details))
     }
 
+    /// Get details about a specific block by its hash.
+    ///
+    /// # Parameters
+    /// - `block_hash`: Block hash
+    ///
+    /// # Returns
+    /// A list of block details.
     #[tool(description = "Get details about a specific block by its hash")]
     pub async fn get_block_by_hash(
         &self,
@@ -604,6 +739,14 @@ impl SubstrateTool {
         Ok(CallToolResult::success(details))
     }
 
+    /// Find specific extrinsics in the latest block by pallet and call names.
+    ///
+    /// # Parameters
+    /// - `pallet_name`: Pallet name
+    /// - `call_name`: Call name
+    ///
+    /// # Returns
+    /// A list of extrinsics with their details.
     #[tool(description = "Find specific extrinsics in the latest block by pallet and call names")]
     pub async fn find_extrinsics(
         &self,
@@ -664,6 +807,10 @@ impl SubstrateTool {
         Ok(CallToolResult::success(found_extrinsics))
     }
 
+    /// Get basic system information via RPC.
+    ///
+    /// # Returns
+    /// A list of system information.
     #[tool(description = "Get basic system information via RPC")]
     pub async fn get_system_info(&self) -> Result<CallToolResult, McpError> {
         let rpc = self.rpc_methods.lock().await;
@@ -697,6 +844,14 @@ impl SubstrateTool {
         Ok(CallToolResult::success(info))
     }
 
+    /// Make a custom RPC call.
+    ///
+    /// # Parameters
+    /// - `method`: RPC method name
+    /// - `params`: Optional parameters as a string
+    ///
+    /// # Returns
+    /// The result of the RPC call as a string.
     #[tool(description = "Make a custom RPC call")]
     pub async fn custom_rpc(
         &self,

@@ -1,11 +1,11 @@
 use anyhow::Result;
 use rmcp::{ServiceExt, transport::stdio};
-use tools::substrate::SubstrateTool;
+use tooling::substrate::SubstrateTool;
 use tracing_subscriber::{self, EnvFilter};
 
-mod tools;
+mod tooling;
 
-pub use tools::*;
+pub use tooling::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
