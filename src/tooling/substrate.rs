@@ -63,7 +63,7 @@ impl SubstrateTool {
             .expect("Failed to create API client");
 
         let signing_keypair = env::var("SIGNING_KEYPAIR_HEX")
-            .map_err(|_| {
+            .inspect_err(|_| {
                 tracing::warn!("SIGNING_KEYPAIR_HEX not set; signing will be disabled");
             })
             .ok()
