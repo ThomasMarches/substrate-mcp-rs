@@ -62,38 +62,41 @@ impl SubstrateTool {
             .await
             .expect("Failed to create API client");
 
-        let signing_keypair = match env::var("SIGNING_KEYPAIR_HEX") {
-            Ok(signing_keypair_hex) => match hex::decode(signing_keypair_hex.trim()) {
-                Ok(bytes) if bytes.len() == 32 => {
-                    match Keypair::from_secret_key(bytes.as_slice().try_into().unwrap()) {
-                        Ok(keypair) => {
-                            tracing::info!("Loaded signing keypair from SIGNING_KEYPAIR_HEX");
-                            Some(keypair)
-                        }
-                        Err(e) => {
+        let signing_keypair = env::var("SIGNING_KEYPAIR_HEX")
+            .map_err(|_| {
+                tracing::warn!("SIGNING_KEYPAIR_HEX not set; signing will be disabled");
+            })
+            .ok()
+            .and_then(|signing_keypair_hex| {
+                hex::decode(signing_keypair_hex.trim())
+                    .map_err(|e| {
+                        tracing::warn!(
+                            "Failed to decode SIGNING_KEYPAIR_HEX as hex: {e}; signing will be disabled"
+                        );
+                    })
+                    .ok()
+            })
+            .and_then(|bytes| {
+                if bytes.len() == 32 {
+                    let secret_key_array: [u8; 32] = bytes.as_slice().try_into().expect(
+                        "SIGNING_KEYPAIR_HEX: Slice of 32 bytes should convert to array [u8; 32]",
+                    );
+
+                    Keypair::from_secret_key(secret_key_array)
+                        .map_err(|e| {
                             tracing::warn!(
                                 "Invalid SIGNING_KEYPAIR_HEX: {e}; signing will be disabled"
                             );
-                            None
-                        }
-                    }
-                }
-                Ok(_) => {
+                        })
+                        .ok()
+                } else {
                     tracing::warn!("SIGNING_KEYPAIR_HEX is not 32 bytes; signing will be disabled");
                     None
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to decode SIGNING_KEYPAIR_HEX as hex: {e}; signing will be disabled"
-                    );
-                    None
-                }
-            },
-            Err(_) => {
-                tracing::warn!("SIGNING_KEYPAIR_HEX not set; signing will be disabled");
-                None
-            }
-        };
+            })
+            .inspect(|_| {
+                    tracing::info!("Loaded signing keypair from SIGNING_KEYPAIR_HEX");
+            });
 
         Self {
             api: Arc::new(Mutex::new(client)),
