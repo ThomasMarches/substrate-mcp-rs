@@ -1,8 +1,7 @@
 # Substrate MCP Server
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-brightgreen)](https://www.rust-lang.org/)
-[![Subxt](https://img.shields.io/badge/Subxt-0.41-orange)](https://github.com/paritytech/subxt)
+[![Rust](https://img.shields.io/badge/Rust-2025-brightgreen)](https://www.rust-lang.org/)
 
 A Model Context Protocol [(MCP)](https://modelcontextprotocol.io/introduction) server for Substrate blockchains, written in Rust. This project exposes dynamic Substrate blockchain operations (querying balances, blocks, pallets, storage, events, and more) via the MCP protocol, and is fully configurable via environment variables.
 
