@@ -376,13 +376,10 @@ impl SubstrateTool {
         let mut result = None;
 
         while let Some(status) = tx_progress.next().await {
-            match status.map_err(|e| {
+            if let TxStatus::InFinalizedBlock(in_block) = status.map_err(|e| {
                 McpError::internal_error(format!("Failed to get transaction status: {}", e), None)
             })? {
-                // It's finalized in a block!
-                TxStatus::InFinalizedBlock(in_block) => result = Some(in_block),
-                // Just log any other status we encounter:
-                _ => (),
+                result = Some(in_block);
             }
         }
 
