@@ -8,10 +8,6 @@ license = "MIT"
 repository = "https://github.com/ThomasMarches/substrate-mcp-rs"
 
 [dependencies]
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = [
-    "server",
-    "transport-io",
-] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -22,3 +18,4 @@ subxt = { version = "0.44", features = ["native"] }
 subxt-signer = "0.44"
 hex = "0.4"
 dotenv = "0.15"
+rmcp = { version = "0.7.0", features = ["server", "transport-io"] }
