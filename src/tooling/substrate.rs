@@ -131,7 +131,7 @@ impl SubstrateTool {
         })?;
 
         let account_balance = storage
-            .fetch(&substrate::storage().balances().account(&account_id))
+            .fetch(&substrate::storage().balances().account(account_id))
             .await
             .map_err(|e| {
                 McpError::resource_not_found(
