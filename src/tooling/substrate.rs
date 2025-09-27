@@ -5,11 +5,17 @@
 
 use dotenv::dotenv;
 use hex;
-use rmcp::model::{CallToolResult, Content};
-use rmcp::tool;
-use rmcp::{Error as McpError, RoleServer, ServerHandler, model::*, service::RequestContext};
+use rmcp::{
+    ErrorData as McpError, RoleServer,
+    handler::server::{ServerHandler, wrapper::Parameters},
+    model::*,
+    schemars::JsonSchema,
+    serde_json::json,
+    service::RequestContext,
+    tool, tool_router,
+};
+use serde::{Deserialize, Serialize};
 use serde_json;
-use serde_json::json;
 use std::env;
 use std::{str::FromStr, sync::Arc};
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
@@ -19,7 +25,7 @@ use subxt::dynamic::Value;
 use subxt::ext::subxt_rpcs::client::RpcParams;
 use subxt::tx::TxStatus;
 use subxt::utils::H256;
-use subxt::{Config, OnlineClient, PolkadotConfig};
+use subxt::{OnlineClient, PolkadotConfig};
 use subxt_signer::sr25519::Keypair;
 use tokio::sync::Mutex;
 use tracing;
@@ -29,6 +35,72 @@ use tracing;
 pub mod substrate {}
 
 type SubstrateConfig = PolkadotConfig;
+
+// Parameter structs for tool methods
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct QueryBalanceParams {
+    pub account: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListPalletEntriesParams {
+    pub pallet_name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DynamicRuntimeCallParams {
+    pub trait_name: String,
+    pub method_name: String,
+    pub args_data: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SendDynamicSignedTransactionParams {
+    pub pallet_name: String,
+    pub call_name: String,
+    pub call_parameters: String,
+    pub mortality: Option<u64>,
+    pub nonce: Option<u64>,
+    pub tip_of_asset_id: Option<u32>,
+    pub tip: Option<u128>,
+    pub tip_of: Option<u128>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct QueryStorageParams {
+    pub pallet_name: String,
+    pub entry_name: String,
+    pub storage_keys: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FindEventsParams {
+    pub pallet_name: String,
+    pub event_name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetConstantParams {
+    pub pallet_name: String,
+    pub constant_name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetBlockByHashParams {
+    pub block_hash: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FindExtrinsicsParams {
+    pub pallet_name: String,
+    pub call_name: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct CustomRpcParams {
+    pub method: String,
+    pub params: Option<String>,
+}
 
 /// Main tool for interacting with a Substrate blockchain via MCP.
 ///
@@ -41,7 +113,7 @@ pub struct SubstrateTool {
     signing_keypair: Option<Keypair>,
 }
 
-#[tool(tool_box)]
+#[tool_router]
 impl SubstrateTool {
     /// Create a new SubstrateTool, loading configuration from environment variables.
     ///
@@ -116,10 +188,10 @@ impl SubstrateTool {
     #[tool(description = "Fetch the balance of an account")]
     pub async fn query_balance(
         &self,
-        #[tool(param)] account: String,
+        params: Parameters<QueryBalanceParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
-        let account_id = AccountId32::from_str(&account).map_err(|e| {
+        let account_id = AccountId32::from_str(&params.0.account).map_err(|e| {
             McpError::invalid_params(
                 "Invalid account address",
                 Some(serde_json::json!({ "error": e.to_string() })),
@@ -137,7 +209,7 @@ impl SubstrateTool {
                 McpError::resource_not_found(
                     format!(
                         "Failed to fetch account balance: {} for account: {}",
-                        e, account
+                        e, params.0.account
                     ),
                     None,
                 )
@@ -148,7 +220,7 @@ impl SubstrateTool {
                 balance.free.to_string(),
             )])),
             None => Err(McpError::resource_not_found(
-                format!("Balance was not found for account: {}", account),
+                format!("Balance was not found for account: {}", params.0.account),
                 None,
             )),
         }
@@ -181,7 +253,7 @@ impl SubstrateTool {
     #[tool(description = "List all of a pallet's entries")]
     pub async fn list_pallet_entries(
         &self,
-        #[tool(param)] pallet_name: String,
+        params: Parameters<ListPalletEntriesParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
         let client_metadata = client.metadata();
@@ -189,7 +261,7 @@ impl SubstrateTool {
         // Find the pallet
         let pallet = client_metadata
             .pallets()
-            .find(|p| *p.name() == pallet_name)
+            .find(|p| *p.name() == params.0.pallet_name)
             .ok_or(McpError::invalid_params("Pallet not found", None))?;
 
         // Get storage
@@ -219,13 +291,15 @@ impl SubstrateTool {
     #[tool(description = "Execute a dynamic runtime API call")]
     pub async fn dynamic_runtime_call(
         &self,
-        #[tool(param)] trait_name: String,
-        #[tool(param)] method_name: String,
-        #[tool(param)] args_data: Vec<String>,
+        params: Parameters<DynamicRuntimeCallParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
 
-        let runtime_api_call = subxt::dynamic::runtime_api_call(trait_name, method_name, args_data);
+        let runtime_api_call = subxt::dynamic::runtime_api_call(
+            params.0.trait_name,
+            params.0.method_name,
+            params.0.args_data,
+        );
         let runtime_api = client.runtime_api().at_latest().await.map_err(|e| {
             McpError::internal_error(format!("Failed to access runtime api: {}", e), None)
         })?;
@@ -257,17 +331,9 @@ impl SubstrateTool {
     /// # Returns
     /// Transaction hash if successful.
     #[tool(description = "Constructs, signs and sends a dynamic transaction")]
-    #[allow(clippy::too_many_arguments)]
     pub async fn send_dynamic_signed_transaction(
         &self,
-        #[tool(param)] pallet_name: String,
-        #[tool(param)] call_name: String,
-        #[tool(param)] call_parameters: String,
-        #[tool(param)] mortality: Option<u64>,
-        #[tool(param)] nonce: Option<u64>,
-        #[tool(param)] tip_of_asset_id: Option<<SubstrateConfig as Config>::AssetId>,
-        #[tool(param)] tip: Option<u128>,
-        #[tool(param)] tip_of: Option<u128>,
+        params: Parameters<SendDynamicSignedTransactionParams>,
     ) -> Result<CallToolResult, McpError> {
         let signing_keypair = self
             .signing_keypair
@@ -276,25 +342,25 @@ impl SubstrateTool {
         let client = self.api.lock().await;
 
         let tx = subxt::dynamic::tx(
-            pallet_name,
-            call_name,
-            vec![Value::from_bytes(call_parameters.as_bytes())],
+            params.0.pallet_name.clone(),
+            params.0.call_name.clone(),
+            vec![Value::from_bytes(params.0.call_parameters.as_bytes())],
         );
         let mut tx_params = Params::new();
 
-        if let Some(mortality) = mortality {
+        if let Some(mortality) = params.0.mortality {
             tx_params = tx_params.mortal(mortality);
         }
 
-        if let Some(nonce) = nonce {
+        if let Some(nonce) = params.0.nonce {
             tx_params = tx_params.nonce(nonce);
         }
 
-        if let (Some(tip_of_asset_id), Some(tip_of)) = (tip_of_asset_id, tip_of) {
+        if let (Some(tip_of_asset_id), Some(tip_of)) = (params.0.tip_of_asset_id, params.0.tip_of) {
             tx_params = tx_params.tip_of(tip_of, tip_of_asset_id);
         }
 
-        if let Some(tip) = tip {
+        if let Some(tip) = params.0.tip {
             tx_params = tx_params.tip(tip);
         }
 
@@ -324,17 +390,9 @@ impl SubstrateTool {
     #[tool(
         description = "Constructs and sends a transaction and waits for it to be included in a block"
     )]
-    #[allow(clippy::too_many_arguments)]
     pub async fn send_dynamic_transaction_and_wait(
         &self,
-        #[tool(param)] pallet_name: String,
-        #[tool(param)] call_name: String,
-        #[tool(param)] call_parameters: String,
-        #[tool(param)] mortality: Option<u64>,
-        #[tool(param)] nonce: Option<u64>,
-        #[tool(param)] tip_of_asset_id: Option<<SubstrateConfig as Config>::AssetId>,
-        #[tool(param)] tip: Option<u128>,
-        #[tool(param)] tip_of: Option<u128>,
+        params: Parameters<SendDynamicSignedTransactionParams>,
     ) -> Result<CallToolResult, McpError> {
         let signing_keypair = self
             .signing_keypair
@@ -343,25 +401,25 @@ impl SubstrateTool {
         let client = self.api.lock().await;
 
         let tx = subxt::dynamic::tx(
-            pallet_name,
-            call_name,
-            vec![Value::from_bytes(call_parameters.as_bytes())],
+            params.0.pallet_name.clone(),
+            params.0.call_name.clone(),
+            vec![Value::from_bytes(params.0.call_parameters.as_bytes())],
         );
         let mut tx_params = Params::new();
 
-        if let Some(mortality) = mortality {
+        if let Some(mortality) = params.0.mortality {
             tx_params = tx_params.mortal(mortality);
         }
 
-        if let Some(nonce) = nonce {
+        if let Some(nonce) = params.0.nonce {
             tx_params = tx_params.nonce(nonce);
         }
 
-        if let (Some(tip_of_asset_id), Some(tip_of)) = (tip_of_asset_id, tip_of) {
+        if let (Some(tip_of_asset_id), Some(tip_of)) = (params.0.tip_of_asset_id, params.0.tip_of) {
             tx_params = tx_params.tip_of(tip_of, tip_of_asset_id);
         }
 
-        if let Some(tip) = tip {
+        if let Some(tip) = params.0.tip {
             tx_params = tx_params.tip(tip);
         }
 
@@ -407,14 +465,14 @@ impl SubstrateTool {
     #[tool(description = "Query storage dynamically by providing pallet and storage item names")]
     pub async fn query_storage(
         &self,
-        #[tool(param)] pallet_name: String,
-        #[tool(param)] entry_name: String,
-        #[tool(param)] storage_keys: Option<Vec<String>>,
+        params: Parameters<QueryStorageParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
 
         // Convert storage keys to Values if provided
-        let keys: Vec<_> = storage_keys
+        let keys: Vec<_> = params
+            .0
+            .storage_keys
             .map(|keys| {
                 keys.into_iter()
                     .map(|k| Value::from_bytes(k.as_bytes()))
@@ -423,7 +481,8 @@ impl SubstrateTool {
             .unwrap_or_default();
 
         // Build the dynamic storage query
-        let storage_query = subxt::dynamic::storage(&pallet_name, &entry_name, keys);
+        let storage_query =
+            subxt::dynamic::storage(&params.0.pallet_name, &params.0.entry_name, keys);
 
         // Execute the storage query
         let storage = client.storage().at_latest().await.map_err(|e| {
@@ -434,7 +493,7 @@ impl SubstrateTool {
             McpError::resource_not_found(
                 format!(
                     "Failed to fetch storage for pallet: {}, storage: {}. Error: {}",
-                    pallet_name, entry_name, e
+                    params.0.pallet_name, params.0.entry_name, e
                 ),
                 None,
             )
@@ -500,8 +559,7 @@ impl SubstrateTool {
     #[tool(description = "Find specific events by pallet and variant name")]
     pub async fn find_events(
         &self,
-        #[tool(param)] pallet_name: String,
-        #[tool(param)] event_name: String,
+        params: Parameters<FindEventsParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
 
@@ -517,11 +575,13 @@ impl SubstrateTool {
                 McpError::internal_error(format!("Failed to decode event: {}", e), None)
             })?;
 
-            if event.pallet_name() == pallet_name && event.variant_name() == event_name {
+            if event.pallet_name() == params.0.pallet_name
+                && event.variant_name() == params.0.event_name
+            {
                 matching_events.push(Content::text(format!(
                     "{}::{}: {}",
-                    pallet_name,
-                    event_name,
+                    params.0.pallet_name,
+                    params.0.event_name,
                     event.field_values().map_err(|e| {
                         McpError::internal_error(format!("Failed to get field values: {}", e), None)
                     })?
@@ -532,7 +592,7 @@ impl SubstrateTool {
         if matching_events.is_empty() {
             matching_events.push(Content::text(format!(
                 "No events found matching {}::{}",
-                pallet_name, event_name
+                params.0.pallet_name, params.0.event_name
             )));
         }
 
@@ -550,20 +610,20 @@ impl SubstrateTool {
     #[tool(description = "Get a constant value from a specific pallet")]
     pub async fn get_constant(
         &self,
-        #[tool(param)] pallet_name: String,
-        #[tool(param)] constant_name: String,
+        params: Parameters<GetConstantParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
 
         // Create a dynamic constant query
-        let constant_query = subxt::dynamic::constant(&pallet_name, &constant_name);
+        let constant_query =
+            subxt::dynamic::constant(&params.0.pallet_name, &params.0.constant_name);
 
         // Get the constant value
         let value = client.constants().at(&constant_query).map_err(|e| {
             McpError::resource_not_found(
                 format!(
                     "Failed to get constant {}::{}: {}",
-                    pallet_name, constant_name, e
+                    params.0.pallet_name, params.0.constant_name, e
                 ),
                 None,
             )
@@ -576,7 +636,7 @@ impl SubstrateTool {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}::{} = {}",
-            pallet_name, constant_name, constant_value
+            params.0.pallet_name, params.0.constant_name, constant_value
         ))]))
     }
 
@@ -671,14 +731,15 @@ impl SubstrateTool {
     #[tool(description = "Get details about a specific block by its hash")]
     pub async fn get_block_by_hash(
         &self,
-        #[tool(param)] block_hash: String,
+        params: Parameters<GetBlockByHashParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
 
         // Parse the block hash
-        let hash_bytes = hex::decode(block_hash.trim_start_matches("0x")).map_err(|e| {
-            McpError::invalid_params(format!("Invalid block hash format: {}", e), None)
-        })?;
+        let hash_bytes =
+            hex::decode(params.0.block_hash.trim_start_matches("0x")).map_err(|e| {
+                McpError::invalid_params(format!("Invalid block hash format: {}", e), None)
+            })?;
 
         // Get the block
         let block = client
@@ -694,7 +755,7 @@ impl SubstrateTool {
         // Block header info
         let block_number = block.header().number;
         details.push(Content::text(format!("Block #{}", block_number)));
-        details.push(Content::text(format!("Hash: {}", block_hash)));
+        details.push(Content::text(format!("Hash: {}", params.0.block_hash)));
 
         // Get extrinsics
         let extrinsics = block.extrinsics().await.map_err(|e| {
@@ -750,8 +811,7 @@ impl SubstrateTool {
     #[tool(description = "Find specific extrinsics in the latest block by pallet and call names")]
     pub async fn find_extrinsics(
         &self,
-        #[tool(param)] pallet_name: String,
-        #[tool(param)] call_name: String,
+        params: Parameters<FindExtrinsicsParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.api.lock().await;
 
@@ -770,7 +830,8 @@ impl SubstrateTool {
                 McpError::internal_error(format!("Failed to get extrinsic metadata: {}", e), None)
             })?;
 
-            if meta.pallet.name() == pallet_name && meta.variant.name == call_name {
+            if meta.pallet.name() == params.0.pallet_name && meta.variant.name == params.0.call_name
+            {
                 let idx = ext.index();
                 let fields = ext.field_values().map_err(|e| {
                     McpError::internal_error(format!("Failed to get field values: {}", e), None)
@@ -778,7 +839,7 @@ impl SubstrateTool {
 
                 found_extrinsics.push(Content::text(format!(
                     "Extrinsic #{}: {}/{}\n  Fields: {}",
-                    idx, pallet_name, call_name, fields
+                    idx, params.0.pallet_name, params.0.call_name, fields
                 )));
 
                 // Include associated events
@@ -800,7 +861,7 @@ impl SubstrateTool {
         if found_extrinsics.is_empty() {
             found_extrinsics.push(Content::text(format!(
                 "No extrinsics found matching {}/{}",
-                pallet_name, call_name
+                params.0.pallet_name, params.0.call_name
             )));
         }
 
@@ -855,30 +916,28 @@ impl SubstrateTool {
     #[tool(description = "Make a custom RPC call")]
     pub async fn custom_rpc(
         &self,
-        #[tool(param)] method: String,
-        #[tool(param)] params: Option<String>,
+        params: Parameters<CustomRpcParams>,
     ) -> Result<CallToolResult, McpError> {
         let rpc_client = self.rpc_client.lock().await;
-        let params = params.unwrap_or_default();
+        let rpc_params_str = params.0.params.unwrap_or_default();
 
         let mut rpc_params = RpcParams::new();
-        rpc_params.push(params).map_err(|e| {
+        rpc_params.push(rpc_params_str).map_err(|e| {
             McpError::internal_error(format!("Failed to parse params: {}", e), None)
         })?;
 
         let result: String = rpc_client
-            .request(&method, rpc_params)
+            .request(&params.0.method, rpc_params)
             .await
             .map_err(|e| McpError::internal_error(format!("RPC call failed: {}", e), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}: {}",
-            method, result
+            params.0.method, result
         ))]))
     }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for SubstrateTool {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -929,6 +988,7 @@ impl ServerHandler for SubstrateTool {
                 Some("This is an example prompt that takes one required argument, message"),
                 Some(vec![PromptArgument {
                     name: "message".to_string(),
+                    title: Some("Message".to_string()),
                     description: Some("A message to put in the prompt".to_string()),
                     required: Some(true),
                 }]),
