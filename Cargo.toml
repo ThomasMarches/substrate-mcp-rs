@@ -18,5 +18,5 @@ subxt = { version = "0.44", features = ["native"] }
 subxt-signer = "0.44"
 hex = "0.4"
 dotenv = "0.15"
-rmcp = { version = "0.7.0", features = ["server", "transport-io"] }
+rmcp = { version = "0.8", features = ["server", "transport-io"] }
 schemars = "1.0.4"
