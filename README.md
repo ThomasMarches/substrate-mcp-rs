@@ -166,3 +166,8 @@ Contributions are welcome! Please open issues or pull requests. For larger chang
 ## 📄 License
 
 MIT
+
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/thomasmarches-substrate-mcp-rs).
+
